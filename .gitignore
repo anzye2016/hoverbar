@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+sysmon.log
+sysmon.json
+build/
+dist/
+*.spec
+
+*.code-workspace
+.vscode/
+.idea/
