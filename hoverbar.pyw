@@ -609,7 +609,7 @@ class MonitorWidget(QWidget):
     # ── 选择性显示 ──
 
     def _load_config(self) -> None:
-        """读取 sysmon.json，首次运行默认全部可见"""
+        """读取 hoverbar.json，首次运行默认全部可见"""
         defaults = {'cpu': True, 'gpu': True, 'mem': True, 'net': True}
         try:
             if os.path.exists(CONFIG_FILE):
@@ -622,7 +622,7 @@ class MonitorWidget(QWidget):
             self._visible_keys = dict(defaults)
 
     def _save_config(self) -> None:
-        """写入 sysmon.json"""
+        """写入 hoverbar.json"""
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump({'visible': self._visible_keys}, f, indent=2)
