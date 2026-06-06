@@ -1,4 +1,4 @@
-# SysMon — Windows 桌面系统监控条
+# HoverBar — Windows 桌面系统监控条
 
 实时显示 CPU / GPU / 内存 / 网速，悬浮在任务栏上方，半透明无边框，支持拖拽和右键菜单。
 
@@ -15,13 +15,13 @@
 
 ## 快速开始（推荐）
 
-从 [Releases](../../releases) 下载 `SysMon.exe`，双击运行。无需安装 Python 或任何依赖。
+从 [Releases](../../releases) 下载 `HoverBar.exe`，双击运行。无需安装 Python 或任何依赖。
 
 ## 开发者安装
 
 ```bash
-git clone https://github.com/你的用户名/sysmon.git
-cd sysmon
+git clone https://github.com/anzye2016/hoverbar.git
+cd hoverbar
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
@@ -30,13 +30,13 @@ python -m venv .venv
 
 ```bash
 # 方式一：exe（推荐）
-双击 SysMon.exe
+双击 HoverBar.exe
 
 # 方式二：Python
 start.bat
 
 # 方式三：命令行
-.venv\Scripts\pythonw.exe sysmon.pyw
+.venv\Scripts\pythonw.exe hoverbar.pyw
 ```
 
 监控条出现在屏幕底部任务栏上方。右键可选择显示/隐藏 CPU、GPU、内存、网速。
@@ -45,14 +45,14 @@ start.bat
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name SysMon sysmon.pyw
-# 输出在 dist/SysMon.exe
+pyinstaller --onefile --windowed --name HoverBar hoverbar.pyw
+# 输出在 dist/HoverBar.exe
 ```
 
 ## 开机自启
 
 1. `Win + R` 输入 `shell:startup` 打开启动文件夹
-2. 将 `SysMon.exe` 或 `start.vbs` 快捷方式放入该文件夹
+2. 将 `HoverBar.exe` 或 `start.vbs` 快捷方式放入该文件夹
 
 ## 依赖
 

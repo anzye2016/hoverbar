@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-SysMon - 桌面系统监控插件
-实时显示 CPU/GPU/内存 使用率和温度
-悬停在任务栏上方，支持拖拽和右键菜单
+HoverBar - 桌面系统监控条
+实时显示 CPU/GPU/内存/网速，悬停在任务栏上方
+半透明无边框，支持拖拽和右键菜单
 """
 
 import sys
@@ -81,8 +81,8 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = APP_DIR
-LOG_FILE = os.path.join(LOG_DIR, "sysmon.log")
-CONFIG_FILE = os.path.join(LOG_DIR, "sysmon.json")
+LOG_FILE = os.path.join(LOG_DIR, "hoverbar.log")
+CONFIG_FILE = os.path.join(LOG_DIR, "hoverbar.json")
 
 def log(msg: str) -> None:
     try:
