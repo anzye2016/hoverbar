@@ -86,6 +86,12 @@ CONFIG_FILE = os.path.join(LOG_DIR, "hoverbar.json")
 
 def log(msg: str) -> None:
     try:
+        # 日志轮转：超 1MB 截断保留末尾 2000 行
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 1024 * 1024:
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            with open(LOG_FILE, "w", encoding="utf-8") as f:
+                f.writelines(lines[-2000:])
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{datetime.now():%H:%M:%S}] {msg}\n")
     except Exception:
@@ -177,6 +183,9 @@ class DataCollector(QObject):
         self._prev_net = psutil.net_io_counters()
         self._prev_net_at = datetime.now()
 
+        # GPU 区块可见标志（由 MonitorWidget 控制）
+        self.gpu_enabled = True
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._collect)
         self._timer.start(UPDATE_MS)
@@ -267,7 +276,7 @@ class DataCollector(QObject):
     # ── GPU ──
 
     def _fill_gpu(self, d: SysData) -> None:
-        if not NVML_OK:
+        if not NVML_OK or not self.gpu_enabled:
             return
         try:
             count = nvmlDeviceGetCount()
@@ -475,6 +484,11 @@ class MonitorWidget(QWidget):
         self._build_ui()
         self._start_collector()
 
+        # ── 置顶守卫：每 2 秒重新置顶，防止任务栏点击后盖住 ──
+        self._topmost_timer = QTimer(self)
+        self._topmost_timer.timeout.connect(self._force_topmost)
+        self._topmost_timer.start(2000)
+
         # ── 选择性显示 ──
         # key -> (section, trailing_separator_or_None)
         self._blocks: dict[str, tuple[QFrame, QFrame | None]] = {
@@ -485,6 +499,8 @@ class MonitorWidget(QWidget):
         }
         self._load_config()
         self._apply_visibility()
+        # 同步 GPU 可见性到采集器
+        self._collector.gpu_enabled = self._visible_keys.get('gpu', True)
         self._dock()
 
     # ── 窗口属性 ──
@@ -535,7 +551,7 @@ class MonitorWidget(QWidget):
 
     def _on_data(self, d: SysData) -> None:
         try:
-            self.sec_cpu.refresh(d.cpu_pct, None)
+            self.sec_cpu.refresh(d.cpu_pct, d.cpu_temp)
 
             if d.has_gpu:
                 used_gb = d.gpu_mem_used / 1024**3
@@ -622,7 +638,20 @@ class MonitorWidget(QWidget):
             self._visible_keys = dict(defaults)
 
     def _save_config(self) -> None:
-        """写入 hoverbar.json"""
+        """写入 hoverbar.json（防抖：300ms 内多次调用只写一次）"""
+        try:
+            if hasattr(self, '_save_timer') and self._save_timer.isActive():
+                self._save_timer.stop()
+            else:
+                self._save_timer = QTimer(self)
+                self._save_timer.setSingleShot(True)
+                self._save_timer.timeout.connect(self._flush_config)
+            self._save_timer.start(300)
+        except Exception:
+            pass
+
+    def _flush_config(self) -> None:
+        """实际写入磁盘"""
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump({'visible': self._visible_keys}, f, indent=2)
@@ -745,6 +774,9 @@ class MonitorWidget(QWidget):
                 action.setChecked(True)
                 return
         self._visible_keys[key] = visible
+        # 同步 GPU 可见性到采集器（隐藏时跳过 NVML 查询）
+        if key == 'gpu':
+            self._collector.gpu_enabled = visible
         self._apply_visibility()
         self._dock()
 
