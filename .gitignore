@@ -7,6 +7,7 @@ build/
 dist/
 *.spec
 
+HoverBar.exe
 *.code-workspace
 .vscode/
 .idea/

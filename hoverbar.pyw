@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPoint
 from PySide6.QtGui import (
     QFont, QColor, QPainter, QPen, QLinearGradient,
-    QAction, QFontDatabase,
+    QAction,
 )
 
 # ── Windows API（强制置顶） ──
@@ -584,9 +584,9 @@ class MonitorWidget(QWidget):
         avail = scr.availableGeometry()
         full  = scr.geometry()
 
-        # 估算任务栏高度（0 表示任务栏在侧面／隐藏）
+        # 估算任务栏尺寸（0 表示任务栏在侧面／隐藏）
         taskbar_h = full.height() - avail.height()
-        taskbar_b = full.width()  - avail.width()
+        taskbar_w = full.width()  - avail.width()
 
         visible_n = sum(1 for v in self._visible_keys.values() if v)
         ideal = 180 * visible_n
@@ -596,7 +596,7 @@ class MonitorWidget(QWidget):
         y = avail.y() + avail.height() - WIDGET_HEIGHT
 
         # 如果任务栏在底部，贴上去
-        if taskbar_h > 0 and taskbar_b == 0:
+        if taskbar_h > 0 and taskbar_w == 0:
             y -= taskbar_h
 
         self.setGeometry(x, y, w, WIDGET_HEIGHT)
@@ -661,15 +661,22 @@ class MonitorWidget(QWidget):
     def _apply_visibility(self) -> None:
         """根据 _visible_keys 显示/隐藏区块和分隔符"""
         keys = list(self._blocks.keys())
+        for key in keys:
+            section, _ = self._blocks[key]
+            section.setVisible(self._visible_keys.get(key, True))
+
         for i, key in enumerate(keys):
-            section, sep = self._blocks[key]
-            visible = self._visible_keys.get(key, True)
-            section.setVisible(visible)
-            if sep:
-                # 分隔符只在两个相邻区块都可见时才显示
-                next_key = keys[i + 1] if i + 1 < len(keys) else None
-                next_visible = self._visible_keys.get(next_key, True) if next_key else False
-                sep.setVisible(visible and next_visible)
+            _, sep = self._blocks[key]
+            if not sep:
+                continue
+            this_visible = self._visible_keys.get(key, True)
+            next_visible = False
+            for j in range(i + 1, len(keys)):
+                if self._visible_keys.get(keys[j], True):
+                    next_visible = True
+                    break
+            sep.setVisible(this_visible and next_visible)
+
         self._save_config()
 
     # ── 背景绘制 ──
