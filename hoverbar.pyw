@@ -584,20 +584,12 @@ class MonitorWidget(QWidget):
         avail = scr.availableGeometry()
         full  = scr.geometry()
 
-        # 估算任务栏尺寸（0 表示任务栏在侧面／隐藏）
-        taskbar_h = full.height() - avail.height()
-        taskbar_w = full.width()  - avail.width()
-
         visible_n = sum(1 for v in self._visible_keys.values() if v)
         ideal = 180 * visible_n
         natural = self.sizeHint().width()
         w = min(max(natural, ideal), avail.width() - 40)
-        x = avail.x() + (avail.width() - w) // 2
-        y = avail.y() + avail.height() - WIDGET_HEIGHT
-
-        # 如果任务栏在底部，贴上去
-        if taskbar_h > 0 and taskbar_w == 0:
-            y -= taskbar_h
+        x = avail.x()
+        y = full.y() + full.height() - WIDGET_HEIGHT - 3
 
         self.setGeometry(x, y, w, WIDGET_HEIGHT)
         self._force_topmost()
