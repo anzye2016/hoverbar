@@ -87,7 +87,7 @@ UPDATE_MS = 1500          # 刷新间隔（毫秒）
 WIDGET_HEIGHT = 44        # 控件高度
 
 # ── 精致暗色调色板（去饱和、温润） ──
-COLOR_BG     = QColor(22, 22, 26, 160)   # 暖暗底（配合 Acrylic 毛玻璃）
+COLOR_BG     = QColor(22, 22, 26, 220)   # 暖暗底
 COLOR_BORDER = QColor(55, 55, 62, 90)    # 极淡边框
 COLOR_TEXT   = QColor(225, 225, 232)     # 主文字
 COLOR_DIM    = QColor(135, 135, 148)     # 辅助文字

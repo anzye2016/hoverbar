@@ -1,6 +1,11 @@
 @echo off
 REM HoverBar - Build exe
 cd /d "%~dp0"
+
+if not exist .venv (
+    python -m venv .venv
+)
+
 .venv\Scripts\python.exe -m pip install -r requirements.txt -q
 .venv\Scripts\python.exe -m PyInstaller HoverBar.spec --distpath .
 if %errorlevel% equ 0 (
