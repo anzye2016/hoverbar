@@ -17,9 +17,12 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QFrame, QMenu,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPoint
+from PySide6.QtCore import (
+    Qt, QTimer, Signal, QObject, QPoint, Property,
+    QPropertyAnimation, QEasingCurve,
+)
 from PySide6.QtGui import (
-    QFont, QColor, QPainter, QPen, QLinearGradient,
+    QFont, QColor, QPainter, QPen,
     QAction,
 )
 
@@ -56,6 +59,13 @@ try:
 except Exception:
     WMI_OK = False
 
+# ── LibreHardwareMonitorLib（CPU 精确温度，需管理员） ──
+try:
+    import clr
+    LHM_AVAILABLE = True
+except ImportError:
+    LHM_AVAILABLE = False
+
 
 # ════════════════════════════════════════════════════════════════════
 #  常量
@@ -64,25 +74,34 @@ except Exception:
 UPDATE_MS = 1500          # 刷新间隔（毫秒）
 WIDGET_HEIGHT = 44        # 控件高度
 
-COLOR_BG     = QColor(28, 28, 30, 210)
-COLOR_BORDER = QColor(60, 60, 65, 80)
-COLOR_TEXT   = QColor(220, 220, 225)
-COLOR_DIM    = QColor(140, 140, 150)
-COLOR_BAR_BG = QColor(60, 60, 65, 120)
-COLOR_CPU    = QColor(0,  120, 212)   # 蓝
-COLOR_GPU    = QColor(197, 48, 48)    # 红
-COLOR_MEM    = QColor(16, 124, 16)    # 绿
+# ── 精致暗色调色板（去饱和、温润） ──
+COLOR_BG     = QColor(22, 22, 26, 215)   # 暖暗底
+COLOR_BORDER = QColor(55, 55, 62, 90)    # 极淡边框
+COLOR_TEXT   = QColor(225, 225, 232)     # 主文字
+COLOR_DIM    = QColor(135, 135, 148)     # 辅助文字
+COLOR_BAR_BG = QColor(55, 55, 62, 100)  # 进度条底
 
-FONT_NAME = "Segoe UI"
+# 指标色 — 低饱和、有质感
+COLOR_CPU    = QColor(96,  165, 250)     # 柔蓝
+COLOR_GPU    = QColor(251, 113, 133)     # 柔红
+COLOR_MEM    = QColor(52,  211, 153)     # 柔绿
+COLOR_NET    = QColor(167, 139, 250)     # 柔紫
+
+# 字体 — 优先系统高品质字体
+FONT_UI     = "Segoe UI Variable Display, Segoe UI, Segoe UI Variable Text"
+FONT_DATA   = "Cascadia Code, JetBrains Mono, Consolas, Courier New"
 
 # ── 路径（兼容 PyInstaller 打包） ──
 if getattr(sys, 'frozen', False):
     APP_DIR = os.path.dirname(sys.executable)
+    BASE_DIR = sys._MEIPASS
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    BASE_DIR = APP_DIR
 LOG_DIR = APP_DIR
 LOG_FILE = os.path.join(LOG_DIR, "hoverbar.log")
 CONFIG_FILE = os.path.join(LOG_DIR, "hoverbar.json")
+LHM_DLL = os.path.join(BASE_DIR, 'lib', 'LibreHardwareMonitorLib')
 
 def log(msg: str) -> None:
     try:
@@ -141,6 +160,7 @@ class DataCollector(QObject):
         self._wmi_perf: Optional['wmi.WMI'] = None           # root\cimv2 (性能计数器)
         self._have_cpu_temp = False
         self._cpu_temp_source: Optional[int] = None  # 缓存成功源（1-4），下次优先
+        self._lhm_computer = None  # LibreHardwareMonitorLib 实例
 
         if NVML_OK:
             try:
@@ -178,6 +198,19 @@ class DataCollector(QObject):
             self._have_cpu_temp = bool(self._wmi_conn or self._wmi_lhm
                                        or self._wmi_ohm or self._wmi_perf)
             log(f"CPU 温度检测: {'可用' if self._have_cpu_temp else '不可用'}")
+
+        # ── LibreHardwareMonitorLib ──
+        if LHM_AVAILABLE and os.path.exists(LHM_DLL + '.dll'):
+            try:
+                clr.AddReference(LHM_DLL)
+                from LibreHardwareMonitor.Hardware import Computer
+                self._lhm_computer = Computer()
+                self._lhm_computer.IsCpuEnabled = True
+                self._lhm_computer.Open()
+                self._have_cpu_temp = True
+                log("LibreHardwareMonitorLib 初始化成功")
+            except Exception as e:
+                log(f"LibreHardwareMonitorLib 初始化失败: {e}")
 
         # 网速追踪
         self._prev_net = psutil.net_io_counters()
@@ -222,19 +255,39 @@ class DataCollector(QObject):
     # ── CPU 温度 ──
 
     def _cpu_temp(self) -> Optional[float]:
-        # 若有上次成功的缓存源，优先尝试（短路）
+        # LibreHardwareMonitorLib（精确到核心，需管理员）
+        if self._lhm_computer is not None:
+            t = self._lhm_temp()
+            if t is not None:
+                return t
+        # WMI 回退（主板传感器）
         if self._cpu_temp_source:
             result = self._try_temp_source(self._cpu_temp_source)
             if result is not None:
                 return result
             self._cpu_temp_source = None
-
-        # 遍历所有源，第一个命中则缓存
         for idx in (1, 2, 3, 4):
             result = self._try_temp_source(idx)
             if result is not None:
                 self._cpu_temp_source = idx
                 return result
+        return None
+
+    def _lhm_temp(self) -> Optional[float]:
+        try:
+            temps = []
+            for hardware in self._lhm_computer.Hardware:
+                hardware.Update()
+                if 'cpu' in str(hardware.HardwareType).lower():
+                    for sensor in hardware.Sensors:
+                        if '/temperature' in str(sensor.Identifier):
+                            v = getattr(sensor, 'Value', None)
+                            if v is not None:
+                                temps.append(round(float(v), 1))
+            if temps:
+                return max(temps)
+        except Exception:
+            pass
         return None
 
     def _try_temp_source(self, idx: int) -> Optional[float]:
@@ -294,6 +347,9 @@ class DataCollector(QObject):
             pass
 
     def cleanup(self) -> None:
+        if self._lhm_computer is not None:
+            try: self._lhm_computer.Close()
+            except Exception: pass
         if NVML_OK:
             try: nvmlShutdown()
             except Exception: pass
@@ -303,29 +359,51 @@ class DataCollector(QObject):
 #  自定义进度条
 # ════════════════════════════════════════════════════════════════════
 
-class BarWidget(QWidget):
-    """彩色渐变进度条"""
+class AnimatedBar(QWidget):
+    """平滑动画进度条 — 纯色填充，无渐变"""
 
     HEIGHT = 4
 
     def __init__(self, base_color: QColor, parent=None):
         super().__init__(parent)
-        self._pct: float = 0.0
         self._color = base_color
+        self._val = 0.0       # 动画当前值
+        self._target = 0.0    # 目标值
+        self._anim = None
         self.setFixedHeight(self.HEIGHT)
+
+    # ── QProperty 供动画驱动 ──
+    def _get_val(self) -> float:
+        return self._val
+
+    def _set_val(self, v: float) -> None:
+        self._val = v
+        self.update()
+
+    _animated = Property(float, _get_val, _set_val)
 
     def set_pct(self, val: float) -> None:
         val = max(0.0, min(100.0, val))
-        if val == self._pct:
+        if val == self._target:
             return
-        self._pct = val
-        self.update()
+        self._target = val
+        self._play()
+
+    def _play(self) -> None:
+        if self._anim is not None:
+            self._anim.stop()
+        self._anim = QPropertyAnimation(self, b"_animated")
+        self._anim.setStartValue(self._val)
+        self._anim.setEndValue(self._target)
+        self._anim.setDuration(200)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.start()
 
     def paintEvent(self, _) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        fill = int(w * self._pct / 100.0)
+        fill = int(w * self._val / 100.0)
 
         # 背景
         p.setPen(Qt.PenStyle.NoPen)
@@ -333,16 +411,13 @@ class BarWidget(QWidget):
         p.drawRoundedRect(0, 0, w, h, 2, 2)
 
         # 填充 — 按使用率变色
-        if self._pct < 60:
+        if self._val < 60:
             c = self._color
-        elif self._pct < 85:
-            c = QColor(255, 180, 0)
+        elif self._val < 85:
+            c = QColor(255, 185, 50)
         else:
-            c = QColor(220, 50, 50)
-        grd = QLinearGradient(0, 0, fill, 0)
-        grd.setColorAt(0, c)
-        grd.setColorAt(1, c.lighter(130))
-        p.setBrush(grd)
+            c = QColor(235, 75, 75)
+        p.setBrush(c)
         p.drawRoundedRect(0, 0, fill, h, 2, 2)
         p.end()
 
@@ -354,48 +429,48 @@ class BarWidget(QWidget):
 class Section(QFrame):
     """一个指标的显示单元（CPU / GPU / MEM）"""
 
-    def __init__(self, label: str, icon: str, color: QColor, parent=None):
+    def __init__(self, label: str, color: QColor, parent=None):
         super().__init__(parent)
         self._color = color
-        self._build_ui(label, icon)
+        self._build_ui(label)
 
-    def _build_ui(self, label: str, icon: str) -> None:
+    def _build_ui(self, label: str) -> None:
         self.setFixedHeight(WIDGET_HEIGHT)
 
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(10, 3, 10, 3)
         vbox.setSpacing(1)
 
-        # ── 顶行：图标 百分比 温度 ──
+        # ── 顶行：标签 百分比 温度 ──
         top = QHBoxLayout()
-        top.setSpacing(5)
+        top.setSpacing(6)
 
-        self.lbl_title = QLabel(f"{icon} {label}")
-        self.lbl_title.setFont(QFont(FONT_NAME, 9, QFont.Weight.Bold))
+        self.lbl_title = QLabel(label)
+        self.lbl_title.setFont(QFont(FONT_UI, 9, QFont.Weight.Bold))
         self.lbl_title.setStyleSheet(f"color: {self._color.name()};")
         top.addWidget(self.lbl_title)
 
         top.addStretch()
 
         self.lbl_pct = QLabel("0%")
-        self.lbl_pct.setFont(QFont(FONT_NAME, 9))
+        self.lbl_pct.setFont(QFont(FONT_DATA, 9))
         self.lbl_pct.setStyleSheet(f"color: {COLOR_TEXT.name()};")
         top.addWidget(self.lbl_pct)
 
         self.lbl_temp = QLabel("")
-        self.lbl_temp.setFont(QFont(FONT_NAME, 8))
+        self.lbl_temp.setFont(QFont(FONT_DATA, 8))
         self.lbl_temp.setStyleSheet(f"color: {COLOR_DIM.name()};")
         top.addWidget(self.lbl_temp)
 
         vbox.addLayout(top)
 
         # ── 进度条 ──
-        self.bar = BarWidget(self._color)
+        self.bar = AnimatedBar(self._color)
         vbox.addWidget(self.bar)
 
         # ── 底行（VRAM / 内存详情） ──
         self.lbl_info = QLabel("")
-        self.lbl_info.setFont(QFont(FONT_NAME, 7))
+        self.lbl_info.setFont(QFont(FONT_DATA, 7))
         self.lbl_info.setStyleSheet(f"color: {COLOR_DIM.name()};")
         vbox.addWidget(self.lbl_info)
 
@@ -403,7 +478,7 @@ class Section(QFrame):
                 info: str = "", bar_pct: float | None = None) -> None:
         self.lbl_pct.setText(f"{pct:.0f}%")
         self.bar.set_pct(bar_pct if bar_pct is not None else pct)
-        self.lbl_temp.setText(f"🌡 {temp:.0f}°C" if temp is not None else "")
+        self.lbl_temp.setText(f"{temp:.0f}°" if temp is not None else "")
         self.lbl_info.setText(info)
 
 
@@ -425,8 +500,6 @@ def _fmt_speed(bps: float) -> str:
 class NetSection(QFrame):
     """网速显示（仅数字，无进度条）"""
 
-    COLOR_NET = QColor(180, 130, 220)   # 紫色
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(WIDGET_HEIGHT)
@@ -435,28 +508,28 @@ class NetSection(QFrame):
         vbox.setContentsMargins(10, 3, 10, 3)
         vbox.setSpacing(1)
 
-        # ⬇ 下载
+        # 下载
         d = QHBoxLayout()
         d.setSpacing(4)
-        dl = QLabel("⬇")
-        dl.setFont(QFont(FONT_NAME, 8))
-        dl.setStyleSheet(f"color: {self.COLOR_NET.name()};")
+        dl = QLabel("D")
+        dl.setFont(QFont(FONT_DATA, 8, QFont.Weight.Bold))
+        dl.setStyleSheet(f"color: {COLOR_NET.name()};")
         self.lbl_down = QLabel("0 KB/s")
-        self.lbl_down.setFont(QFont(FONT_NAME, 8))
+        self.lbl_down.setFont(QFont(FONT_DATA, 8))
         self.lbl_down.setStyleSheet(f"color: {COLOR_TEXT.name()};")
         d.addWidget(dl)
         d.addWidget(self.lbl_down)
         d.addStretch()
         vbox.addLayout(d)
 
-        # ⬆ 上传
+        # 上传
         u = QHBoxLayout()
         u.setSpacing(4)
-        ul = QLabel("⬆")
-        ul.setFont(QFont(FONT_NAME, 8))
+        ul = QLabel("U")
+        ul.setFont(QFont(FONT_DATA, 8, QFont.Weight.Bold))
         ul.setStyleSheet(f"color: {COLOR_DIM.name()};")
         self.lbl_up = QLabel("0 KB/s")
-        self.lbl_up.setFont(QFont(FONT_NAME, 8))
+        self.lbl_up.setFont(QFont(FONT_DATA, 8))
         self.lbl_up.setStyleSheet(f"color: {COLOR_DIM.name()};")
         u.addWidget(ul)
         u.addWidget(self.lbl_up)
@@ -523,15 +596,15 @@ class MonitorWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.sec_cpu = Section("CPU",  "🖥", COLOR_CPU)
-        self.sec_gpu = Section("GPU",  "🎮", COLOR_GPU)
-        self.sec_mem = Section("MEM", "📊", COLOR_MEM)
+        self.sec_cpu = Section("CPU", COLOR_CPU)
+        self.sec_gpu = Section("GPU", COLOR_GPU)
+        self.sec_mem = Section("MEM", COLOR_MEM)
         self.sec_net = NetSection()
 
         def _sep() -> QFrame:
             s = QFrame()
             s.setFrameShape(QFrame.Shape.VLine)
-            s.setStyleSheet(f"background:{COLOR_BORDER.name()};max-width:1px;")
+            s.setStyleSheet(f"background:transparent;border-left:1px solid {COLOR_BORDER.name()};")
             s.setFixedWidth(1)
             return s
 
@@ -733,7 +806,7 @@ class MonitorWidget(QWidget):
                 margin:4px 8px;
             }
         """)
-        a_dock = QAction("📌  复位到底部", self)
+        a_dock = QAction("Dock to Bottom", self)
         a_dock.triggered.connect(self._dock)
         menu.addAction(a_dock)
 
@@ -741,10 +814,10 @@ class MonitorWidget(QWidget):
 
         # 选择性显示 — 每项可勾选
         section_info = [
-            ('cpu', '🖥  CPU'),
-            ('gpu', '🎮  GPU'),
-            ('mem', '📊  内存'),
-            ('net', '🌐  网速'),
+            ('cpu', 'CPU'),
+            ('gpu', 'GPU'),
+            ('mem', 'Memory'),
+            ('net', 'Network'),
         ]
         for key, label in section_info:
             a = QAction(label, self)
@@ -756,7 +829,7 @@ class MonitorWidget(QWidget):
 
         menu.addSeparator()
 
-        a_quit = QAction("❌  退出", self)
+        a_quit = QAction("Quit", self)
         a_quit.triggered.connect(self._quit)
         menu.addAction(a_quit)
 
