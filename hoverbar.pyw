@@ -35,7 +35,7 @@ SWP_NOSIZE     = 0x0001
 SWP_NOACTIVATE = 0x0010
 
 _user32 = ctypes.windll.user32
-_SetWindowCompositionAttribute = _user32.SetWindowCompositionAttribute
+_SetWindowCompositionAttribute = getattr(_user32, 'SetWindowCompositionAttribute', None)
 
 # ── Accent / Acrylic 结构 ──
 class ACCENTPOLICY(ctypes.Structure):
@@ -107,9 +107,8 @@ if getattr(sys, 'frozen', False):
     APP_DIR = os.path.dirname(sys.executable)
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = APP_DIR
-LOG_FILE = os.path.join(LOG_DIR, "hoverbar.log")
-CONFIG_FILE = os.path.join(LOG_DIR, "hoverbar.json")
+LOG_FILE = os.path.join(APP_DIR, "hoverbar.log")
+CONFIG_FILE = os.path.join(APP_DIR, "hoverbar.json")
 
 def log(msg: str) -> None:
     try:
@@ -176,7 +175,6 @@ class DataCollector(QObject):
             except Exception as e:
                 log(f"NVML 初始化失败: {e}")
 
-        # ── 先启动 LibreHardwareMonitor 进程 ──
         if WMI_OK:
             ns_list = [
                 ("root\\wmi",              "_wmi_conn"),
@@ -571,7 +569,7 @@ class MonitorWidget(QWidget):
         try:
             self.sec_cpu.refresh(d.cpu_pct, d.cpu_temp)
 
-            if d.has_gpu:
+            if d.has_gpu and d.gpu_mem_total > 0:
                 used_gb = d.gpu_mem_used / 1024**3
                 tot_gb  = d.gpu_mem_total / 1024**3
                 vram_pct = d.gpu_mem_used / d.gpu_mem_total * 100
