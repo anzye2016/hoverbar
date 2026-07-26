@@ -36,6 +36,26 @@ SWP_NOSIZE     = 0x0001
 SWP_NOACTIVATE = 0x0010
 
 _user32 = ctypes.windll.user32
+_SetWindowCompositionAttribute = _user32.SetWindowCompositionAttribute
+
+# ── Accent / Acrylic 结构 ──
+class ACCENTPOLICY(ctypes.Structure):
+    _fields_ = [
+        ('AccentState', ctypes.c_uint),
+        ('AccentFlags', ctypes.c_uint),
+        ('GradientColor', ctypes.c_uint),
+        ('AnimationId', ctypes.c_uint),
+    ]
+
+class WINCOMPATTRDATA(ctypes.Structure):
+    _fields_ = [
+        ('Attribute', ctypes.c_int),
+        ('Data', ctypes.POINTER(ACCENTPOLICY)),
+        ('SizeOfData', ctypes.c_size_t),
+    ]
+
+ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
+WCA_ACCENT_POLICY = 19
 
 # ── 系统监控 ──
 import psutil
@@ -75,7 +95,7 @@ UPDATE_MS = 1500          # 刷新间隔（毫秒）
 WIDGET_HEIGHT = 44        # 控件高度
 
 # ── 精致暗色调色板（去饱和、温润） ──
-COLOR_BG     = QColor(22, 22, 26, 215)   # 暖暗底
+COLOR_BG     = QColor(22, 22, 26, 160)   # 暖暗底（配合 Acrylic 毛玻璃）
 COLOR_BORDER = QColor(55, 55, 62, 90)    # 极淡边框
 COLOR_TEXT   = QColor(225, 225, 232)     # 主文字
 COLOR_DIM    = QColor(135, 135, 148)     # 辅助文字
@@ -683,8 +703,22 @@ class MonitorWidget(QWidget):
             pass
 
     def showEvent(self, event) -> None:
-        """窗口显示时立即置顶"""
+        """窗口显示时：Acrylic 毛玻璃 + 置顶"""
         super().showEvent(event)
+        if not getattr(self, '_acrylic_done', False):
+            try:
+                h = int(self.winId())
+                accent = ACCENTPOLICY(
+                    ACCENT_ENABLE_ACRYLICBLURBEHIND,
+                    0, 0xBA16161A, 0)
+                data = WINCOMPATTRDATA(
+                    WCA_ACCENT_POLICY,
+                    ctypes.byref(accent),
+                    ctypes.sizeof(accent))
+                _SetWindowCompositionAttribute(wintypes.HWND(h), ctypes.byref(data))
+            except Exception:
+                pass
+            self._acrylic_done = True
         self._force_topmost()
 
     # ── 选择性显示 ──
