@@ -18,8 +18,7 @@ from PySide6.QtWidgets import (
     QLabel, QFrame, QMenu,
 )
 from PySide6.QtCore import (
-    Qt, QTimer, Signal, QObject, QPoint, Property,
-    QPropertyAnimation, QEasingCurve,
+    Qt, QTimer, Signal, QObject, QPoint,
 )
 from PySide6.QtGui import (
     QFont, QColor, QPainter, QPen,
@@ -330,60 +329,36 @@ class DataCollector(QObject):
 # ════════════════════════════════════════════════════════════════════
 
 class AnimatedBar(QWidget):
-    """平滑动画进度条 — 纯色填充，无渐变"""
+    """进度条 — 纯色填充，无渐变，零动画开销"""
 
     HEIGHT = 4
 
     def __init__(self, base_color: QColor, parent=None):
         super().__init__(parent)
         self._color = base_color
-        self._val = 0.0       # 动画当前值
-        self._target = 0.0    # 目标值
-        self._anim = None
+        self._pct = 0.0
         self.setFixedHeight(self.HEIGHT)
-
-    # ── QProperty 供动画驱动 ──
-    def _get_val(self) -> float:
-        return self._val
-
-    def _set_val(self, v: float) -> None:
-        self._val = v
-        self.update()
-
-    _animated = Property(float, _get_val, _set_val)
 
     def set_pct(self, val: float) -> None:
         val = max(0.0, min(100.0, val))
-        if val == self._target:
+        if val == self._pct:
             return
-        self._target = val
-        self._play()
-
-    def _play(self) -> None:
-        if self._anim is not None:
-            self._anim.stop()
-        self._anim = QPropertyAnimation(self, b"_animated")
-        self._anim.setStartValue(self._val)
-        self._anim.setEndValue(self._target)
-        self._anim.setDuration(200)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._anim.start()
+        self._pct = val
+        self.update()
 
     def paintEvent(self, _) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        fill = int(w * self._val / 100.0)
+        fill = int(w * self._pct / 100.0)
 
-        # 背景
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(COLOR_BAR_BG)
         p.drawRoundedRect(0, 0, w, h, 2, 2)
 
-        # 填充 — 按使用率变色
-        if self._val < 60:
+        if self._pct < 60:
             c = self._color
-        elif self._val < 85:
+        elif self._pct < 85:
             c = QColor(255, 185, 50)
         else:
             c = QColor(235, 75, 75)
