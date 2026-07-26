@@ -8,6 +8,7 @@ HoverBar - 桌面系统监控条
 import sys
 import os
 import json
+import subprocess
 import traceback
 from datetime import datetime
 from typing import Optional
@@ -79,14 +80,6 @@ try:
 except Exception:
     WMI_OK = False
 
-# ── LibreHardwareMonitorLib（CPU 精确温度，需管理员） ──
-try:
-    import clr
-    LHM_AVAILABLE = True
-except ImportError:
-    LHM_AVAILABLE = False
-
-
 # ════════════════════════════════════════════════════════════════════
 #  常量
 # ════════════════════════════════════════════════════════════════════
@@ -121,7 +114,7 @@ else:
 LOG_DIR = APP_DIR
 LOG_FILE = os.path.join(LOG_DIR, "hoverbar.log")
 CONFIG_FILE = os.path.join(LOG_DIR, "hoverbar.json")
-LHM_DLL = os.path.join(BASE_DIR, 'lib', 'LibreHardwareMonitorLib')
+LHM_EXE = os.path.join(BASE_DIR, 'lib', 'LibreHardwareMonitor.exe')
 
 def log(msg: str) -> None:
     try:
@@ -180,7 +173,7 @@ class DataCollector(QObject):
         self._wmi_perf: Optional['wmi.WMI'] = None           # root\cimv2 (性能计数器)
         self._have_cpu_temp = False
         self._cpu_temp_source: Optional[int] = None  # 缓存成功源（1-4），下次优先
-        self._lhm_computer = None  # LibreHardwareMonitorLib 实例
+        self._lhm_proc: Optional[subprocess.Popen] = None  # LibreHardwareMonitor 进程
 
         if NVML_OK:
             try:
@@ -188,6 +181,16 @@ class DataCollector(QObject):
                 log("NVML 初始化成功")
             except Exception as e:
                 log(f"NVML 初始化失败: {e}")
+
+        # ── 先启动 LibreHardwareMonitor 进程 ──
+        if os.path.exists(LHM_EXE):
+            try:
+                ctypes.windll.shell32.ShellExecuteW(
+                    None, "runas", LHM_EXE, None, None, 6)
+                log("LibreHardwareMonitor 进程已启动")
+                self._lhm_proc = True
+            except Exception as e:
+                log(f"LibreHardwareMonitor 进程启动失败: {e}")
 
         if WMI_OK:
             ns_list = [
@@ -219,18 +222,9 @@ class DataCollector(QObject):
                                        or self._wmi_ohm or self._wmi_perf)
             log(f"CPU 温度检测: {'可用' if self._have_cpu_temp else '不可用'}")
 
-        # ── LibreHardwareMonitorLib ──
-        if LHM_AVAILABLE and os.path.exists(LHM_DLL + '.dll'):
-            try:
-                clr.AddReference(LHM_DLL)
-                from LibreHardwareMonitor.Hardware import Computer
-                self._lhm_computer = Computer()
-                self._lhm_computer.IsCpuEnabled = True
-                self._lhm_computer.Open()
-                self._have_cpu_temp = True
-                log("LibreHardwareMonitorLib 初始化成功")
-            except Exception as e:
-                log(f"LibreHardwareMonitorLib 初始化失败: {e}")
+            # 等 LibreHardwareMonitor 注册 WMI 后重试连接
+            if self._lhm_proc is not None and self._wmi_lhm is None:
+                QTimer.singleShot(3000, self._retry_lhm_wmi)
 
         # 网速追踪
         self._prev_net = psutil.net_io_counters()
@@ -242,6 +236,19 @@ class DataCollector(QObject):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._collect)
         self._timer.start(UPDATE_MS)
+
+    def _retry_lhm_wmi(self) -> None:
+        try:
+            c = wmi.WMI(namespace="root\\LibreHardwareMonitor")
+            test = c.Sensor()
+            if len(test) > 0:
+                self._wmi_lhm = c
+                self._have_cpu_temp = True
+                log("LibreHardwareMonitor WMI 重连成功")
+            else:
+                log("LibreHardwareMonitor WMI: 无传感器")
+        except Exception as e:
+            log(f"LibreHardwareMonitor WMI 重连失败: {e}")
 
     # ── 采集 ──
 
@@ -275,12 +282,6 @@ class DataCollector(QObject):
     # ── CPU 温度 ──
 
     def _cpu_temp(self) -> Optional[float]:
-        # LibreHardwareMonitorLib（精确到核心，需管理员）
-        if self._lhm_computer is not None:
-            t = self._lhm_temp()
-            if t is not None:
-                return t
-        # WMI 回退（主板传感器）
         if self._cpu_temp_source:
             result = self._try_temp_source(self._cpu_temp_source)
             if result is not None:
@@ -291,23 +292,6 @@ class DataCollector(QObject):
             if result is not None:
                 self._cpu_temp_source = idx
                 return result
-        return None
-
-    def _lhm_temp(self) -> Optional[float]:
-        try:
-            temps = []
-            for hardware in self._lhm_computer.Hardware:
-                hardware.Update()
-                if 'cpu' in str(hardware.HardwareType).lower():
-                    for sensor in hardware.Sensors:
-                        if '/temperature' in str(sensor.Identifier):
-                            v = getattr(sensor, 'Value', None)
-                            if v is not None:
-                                temps.append(round(float(v), 1))
-            if temps:
-                return max(temps)
-        except Exception:
-            pass
         return None
 
     def _try_temp_source(self, idx: int) -> Optional[float]:
@@ -367,9 +351,13 @@ class DataCollector(QObject):
             pass
 
     def cleanup(self) -> None:
-        if self._lhm_computer is not None:
-            try: self._lhm_computer.Close()
-            except Exception: pass
+        if self._lhm_proc:
+            try:
+                for p in __import__('psutil').process_iter(['pid', 'name']):
+                    if p.info.get('name') == 'LibreHardwareMonitor.exe':
+                        p.kill()
+            except Exception:
+                pass
         if NVML_OK:
             try: nvmlShutdown()
             except Exception: pass

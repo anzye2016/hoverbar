@@ -4,4 +4,3 @@ PySide6>=6.8
 nvidia-ml-py>=12
 pywin32>=310
 wmi>=1.5
-pythonnet>=3.0
