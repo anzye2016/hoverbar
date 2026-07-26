@@ -8,7 +8,6 @@ HoverBar - 桌面系统监控条
 import sys
 import os
 import json
-import subprocess
 import traceback
 from datetime import datetime
 from typing import Optional
@@ -107,14 +106,11 @@ FONT_DATA   = "Cascadia Code, JetBrains Mono, Consolas, Courier New"
 # ── 路径（兼容 PyInstaller 打包） ──
 if getattr(sys, 'frozen', False):
     APP_DIR = os.path.dirname(sys.executable)
-    BASE_DIR = sys._MEIPASS
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
-    BASE_DIR = APP_DIR
 LOG_DIR = APP_DIR
 LOG_FILE = os.path.join(LOG_DIR, "hoverbar.log")
 CONFIG_FILE = os.path.join(LOG_DIR, "hoverbar.json")
-LHM_EXE = os.path.join(BASE_DIR, 'lib', 'LibreHardwareMonitor.exe')
 
 def log(msg: str) -> None:
     try:
@@ -173,7 +169,6 @@ class DataCollector(QObject):
         self._wmi_perf: Optional['wmi.WMI'] = None           # root\cimv2 (性能计数器)
         self._have_cpu_temp = False
         self._cpu_temp_source: Optional[int] = None  # 缓存成功源（1-4），下次优先
-        self._lhm_proc: Optional[subprocess.Popen] = None  # LibreHardwareMonitor 进程
 
         if NVML_OK:
             try:
@@ -183,15 +178,6 @@ class DataCollector(QObject):
                 log(f"NVML 初始化失败: {e}")
 
         # ── 先启动 LibreHardwareMonitor 进程 ──
-        if os.path.exists(LHM_EXE):
-            try:
-                ctypes.windll.shell32.ShellExecuteW(
-                    None, "runas", LHM_EXE, None, None, 6)
-                log("LibreHardwareMonitor 进程已启动")
-                self._lhm_proc = True
-            except Exception as e:
-                log(f"LibreHardwareMonitor 进程启动失败: {e}")
-
         if WMI_OK:
             ns_list = [
                 ("root\\wmi",              "_wmi_conn"),
@@ -222,10 +208,6 @@ class DataCollector(QObject):
                                        or self._wmi_ohm or self._wmi_perf)
             log(f"CPU 温度检测: {'可用' if self._have_cpu_temp else '不可用'}")
 
-            # 等 LibreHardwareMonitor 注册 WMI 后重试连接
-            if self._lhm_proc is not None and self._wmi_lhm is None:
-                QTimer.singleShot(3000, self._retry_lhm_wmi)
-
         # 网速追踪
         self._prev_net = psutil.net_io_counters()
         self._prev_net_at = datetime.now()
@@ -236,19 +218,6 @@ class DataCollector(QObject):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._collect)
         self._timer.start(UPDATE_MS)
-
-    def _retry_lhm_wmi(self) -> None:
-        try:
-            c = wmi.WMI(namespace="root\\LibreHardwareMonitor")
-            test = c.Sensor()
-            if len(test) > 0:
-                self._wmi_lhm = c
-                self._have_cpu_temp = True
-                log("LibreHardwareMonitor WMI 重连成功")
-            else:
-                log("LibreHardwareMonitor WMI: 无传感器")
-        except Exception as e:
-            log(f"LibreHardwareMonitor WMI 重连失败: {e}")
 
     # ── 采集 ──
 
@@ -351,13 +320,6 @@ class DataCollector(QObject):
             pass
 
     def cleanup(self) -> None:
-        if self._lhm_proc:
-            try:
-                for p in __import__('psutil').process_iter(['pid', 'name']):
-                    if p.info.get('name') == 'LibreHardwareMonitor.exe':
-                        p.kill()
-            except Exception:
-                pass
         if NVML_OK:
             try: nvmlShutdown()
             except Exception: pass
