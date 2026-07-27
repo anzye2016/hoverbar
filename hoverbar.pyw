@@ -147,7 +147,6 @@ class DataCollector(QObject):
         self._wmi_perf: Optional['wmi.WMI'] = None           # root\cimv2 (性能计数器)
         self._have_cpu_temp = False
         self._cpu_temp_source: Optional[int] = None  # 缓存成功源（1-4），下次优先
-        self._est_temp: Optional[float] = None   # 估算 CPU 温度
         self._est_base: Optional[float] = None   # 基准温度（来自 GPU 空载）
 
         if NVML_OK:
@@ -230,14 +229,9 @@ class DataCollector(QObject):
     # ── CPU 温度 ──
 
     def _cpu_temp(self, cpu_pct: float) -> Optional[float]:
-        # 有 GPU 空载基准 → 用一阶热模型估算
+        # 有 GPU 空载基准 → 估算 CPU 温度
         if self._est_base is not None:
-            target = self._est_base + cpu_pct * 0.45
-            if self._est_temp is None:
-                self._est_temp = target
-            else:
-                self._est_temp = self._est_temp * 0.97 + target * 0.03
-            return round(self._est_temp, 1)
+            return round(self._est_base + cpu_pct * 0.3 - 5, 1)
         # 无 GPU → 回退 WMI
         if self._cpu_temp_source:
             result = self._try_temp_source(self._cpu_temp_source)
