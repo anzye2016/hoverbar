@@ -229,9 +229,11 @@ class DataCollector(QObject):
     # ── CPU 温度 ──
 
     def _cpu_temp(self, cpu_pct: float) -> Optional[float]:
-        # 有 GPU 空载基准 → 估算 CPU 温度
+        # 有 GPU 空载基准 → 用幂律估算 CPU 温度
         if self._est_base is not None:
-            return round(self._est_base + cpu_pct * 0.3 - 5, 1)
+            ratio = cpu_pct / 100
+            rise = 65 * ratio ** 0.7
+            return round(self._est_base + rise - 5, 1)
         # 无 GPU → 回退 WMI
         if self._cpu_temp_source:
             result = self._try_temp_source(self._cpu_temp_source)
