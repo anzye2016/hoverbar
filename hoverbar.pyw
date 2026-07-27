@@ -148,6 +148,7 @@ class DataCollector(QObject):
         self._have_cpu_temp = False
         self._cpu_temp_source: Optional[int] = None  # 缓存成功源（1-4），下次优先
         self._est_base: Optional[float] = None   # 基准温度（来自 GPU 空载）
+        self._cpu_est: Optional[float] = None    # 一阶热惯性滤波后的 CPU 温度
 
         if NVML_OK:
             try:
@@ -229,11 +230,16 @@ class DataCollector(QObject):
     # ── CPU 温度 ──
 
     def _cpu_temp(self, cpu_pct: float) -> Optional[float]:
-        # 有 GPU 空载基准 → 用幂律估算 CPU 温度
+        # 有 GPU 空载基准 → 用幂律估算 CPU 温度，一阶热惯性滤波
         if self._est_base is not None:
             ratio = cpu_pct / 100
-            rise = 65 * ratio ** 0.7
-            return round(self._est_base + rise - 5, 1)
+            eq = self._est_base + 65 * ratio ** 0.7 - 5
+            if self._cpu_est is None:
+                self._cpu_est = eq
+            else:
+                alpha = 1 / 30  # ~30s 时间常数（1.5s 步长）
+                self._cpu_est += (eq - self._cpu_est) * alpha
+            return round(min(self._cpu_est, 100), 1)
         # 无 GPU → 回退 WMI
         if self._cpu_temp_source:
             result = self._try_temp_source(self._cpu_temp_source)
