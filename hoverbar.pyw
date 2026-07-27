@@ -10,7 +10,6 @@ import os
 import json
 import traceback
 from datetime import datetime
-from typing import Optional
 
 # ── Qt ──
 from PySide6.QtWidgets import (
@@ -39,6 +38,12 @@ _user32 = ctypes.windll.user32
 # ── 系统监控 ──
 import psutil
 
+try:
+    import win32pdh
+    PDH_OK = True
+except Exception:
+    PDH_OK = False
+
 # ── NVIDIA GPU ──
 try:
     from pynvml import (
@@ -51,12 +56,6 @@ try:
 except Exception:
     NVML_OK = False
 
-# ── WMI（CPU温度） ──
-try:
-    import wmi
-    WMI_OK = True
-except Exception:
-    WMI_OK = False
 
 # ════════════════════════════════════════════════════════════════════
 #  常量
@@ -111,7 +110,7 @@ def log(msg: str) -> None:
 class SysData:
     """一次采集的快照"""
     __slots__ = (
-        'cpu_pct', 'cpu_temp',
+        'cpu_pct', 'cpu_freq',
         'mem_pct', 'mem_used', 'mem_total',
         'gpu_pct', 'gpu_mem_used', 'gpu_mem_total', 'gpu_temp',
         'net_down', 'net_up',
@@ -119,14 +118,14 @@ class SysData:
 
     def __init__(self):
         self.cpu_pct: float = 0.0
-        self.cpu_temp: Optional[float] = None
+        self.cpu_freq: float = 0.0
         self.mem_pct: float = 0.0
         self.mem_used: int = 0
         self.mem_total: int = 0
-        self.gpu_pct: Optional[float] = None
-        self.gpu_mem_used: Optional[int] = None
-        self.gpu_mem_total: Optional[int] = None
-        self.gpu_temp: Optional[float] = None
+        self.gpu_pct: float | None = None
+        self.gpu_mem_used: int | None = None
+        self.gpu_mem_total: int | None = None
+        self.gpu_temp: float | None = None
         self.net_down: float = 0.0
         self.net_up: float = 0.0
 
@@ -141,14 +140,18 @@ class DataCollector(QObject):
 
     def __init__(self):
         super().__init__()
-        self._wmi_conn: Optional['wmi.WMI'] = None          # root\wmi
-        self._wmi_lhm: Optional['wmi.WMI'] = None            # LibreHardwareMonitor
-        self._wmi_ohm: Optional['wmi.WMI'] = None            # OpenHardwareMonitor
-        self._wmi_perf: Optional['wmi.WMI'] = None           # root\cimv2 (性能计数器)
-        self._have_cpu_temp = False
-        self._cpu_temp_source: Optional[int] = None  # 缓存成功源（1-4），下次优先
-        self._est_base: Optional[float] = None   # 基准温度（来自 GPU 空载）
-        self._cpu_est: Optional[float] = None    # 一阶热惯性滤波后的 CPU 温度
+
+        # PDH 查询（CPU 实际频率）
+        self._pdh_query: int | None = None
+        self._pdh_counter: int | None = None
+        if PDH_OK:
+            try:
+                self._pdh_query = win32pdh.OpenQuery()
+                path = r'\Processor Information(0,_Total)\Actual Frequency'
+                self._pdh_counter = win32pdh.AddCounter(self._pdh_query, path)
+                win32pdh.CollectQueryData(self._pdh_query)
+            except Exception as e:
+                log(f"PDH 初始化失败: {e}")
 
         if NVML_OK:
             try:
@@ -156,36 +159,6 @@ class DataCollector(QObject):
                 log("NVML 初始化成功")
             except Exception as e:
                 log(f"NVML 初始化失败: {e}")
-
-        if WMI_OK:
-            ns_list = [
-                ("root\\wmi",              "_wmi_conn"),
-                ("root\\LibreHardwareMonitor", "_wmi_lhm"),
-                ("root\\OpenHardwareMonitor",  "_wmi_ohm"),
-            ]
-            for ns, attr in ns_list:
-                try:
-                    setattr(self, attr, wmi.WMI(namespace=ns))
-                    log(f"WMI 连接成功: {ns}")
-                except Exception as e:
-                    log(f"WMI 连接失败 {ns}: {e}")
-
-            # 额外试 root\cimv2 下 Win32_PerfFormattedData_Counters_ThermalZoneInformation
-            try:
-                cimv2 = wmi.WMI(namespace="root\\cimv2")
-                # 仅测试该查询是否可用
-                test = cimv2.query("SELECT * FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation")
-                if len(test) > 0:
-                    self._wmi_perf = cimv2
-                    log("WMI 连接成功: root\\cimv2 (ThermalZoneInformation)")
-                else:
-                    log("WMI root\\cimv2 ThermalZoneInformation: 无数据")
-            except Exception as e:
-                log(f"WMI root\\cimv2 ThermalZoneInformation 失败: {e}")
-
-            self._have_cpu_temp = bool(self._wmi_conn or self._wmi_lhm
-                                       or self._wmi_ohm or self._wmi_perf)
-            log(f"CPU 温度检测: {'可用' if self._have_cpu_temp else '不可用'}")
 
         # 网速追踪
         self._prev_net = psutil.net_io_counters()
@@ -204,7 +177,15 @@ class DataCollector(QObject):
         d = SysData()
         try:
             d.cpu_pct  = psutil.cpu_percent(interval=0)
-            d.cpu_temp = self._cpu_temp(d.cpu_pct)
+            # CPU 频率（PDH Actual Frequency，比 psutil.cpu_freq 更接近真实值）
+            if self._pdh_counter is not None:
+                try:
+                    win32pdh.CollectQueryData(self._pdh_query)
+                    val = win32pdh.GetFormattedCounterValue(
+                        self._pdh_counter, win32pdh.PDH_FMT_DOUBLE)
+                    d.cpu_freq = val[1]
+                except Exception:
+                    pass
 
             mem = psutil.virtual_memory()
             d.mem_pct   = mem.percent
@@ -227,68 +208,6 @@ class DataCollector(QObject):
         self._prev_net = cur
         self._prev_net_at = now
 
-    # ── CPU 温度 ──
-
-    def _cpu_temp(self, cpu_pct: float) -> Optional[float]:
-        # 有 GPU 空载基准 → 用幂律估算 CPU 温度，一阶热惯性滤波
-        if self._est_base is not None:
-            ratio = cpu_pct / 100
-            eq = self._est_base + 65 * ratio ** 0.7 - 5
-            if self._cpu_est is None:
-                self._cpu_est = eq
-            else:
-                alpha = 1 / 30  # ~30s 时间常数（1.5s 步长）
-                self._cpu_est += (eq - self._cpu_est) * alpha
-            return round(min(self._cpu_est, 100), 1)
-        # 无 GPU → 回退 WMI
-        if self._cpu_temp_source:
-            result = self._try_temp_source(self._cpu_temp_source)
-            if result is not None:
-                return result
-            self._cpu_temp_source = None
-        for idx in (1, 2, 3, 4):
-            result = self._try_temp_source(idx)
-            if result is not None:
-                self._cpu_temp_source = idx
-                return result
-        return None
-
-    def _try_temp_source(self, idx: int) -> Optional[float]:
-        """尝试单个温度数据源，成功返回温度，失败返回 None"""
-        if idx == 1 and self._wmi_conn:
-            try:
-                zones = self._wmi_conn.MSAcpi_ThermalZoneTemperature()
-                if zones:
-                    k = zones[0].CurrentTemperature
-                    if k and k > 0:
-                        return round(k / 10 - 273.15, 1)
-            except Exception:
-                pass
-        elif idx == 2 and self._wmi_perf:
-            try:
-                for tz in self._wmi_perf.query(
-                    "SELECT * FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation"
-                ):
-                    if hasattr(tz, 'Temperature') and tz.Temperature:
-                        return round(tz.Temperature / 10, 1)
-            except Exception:
-                pass
-        elif idx == 3 and self._wmi_lhm:
-            try:
-                for s in self._wmi_lhm.Sensor():
-                    if s.SensorType == 'Temperature' and 'CPU' in str(s.Name):
-                        return round(float(s.Value), 1)
-            except Exception:
-                pass
-        elif idx == 4 and self._wmi_ohm:
-            try:
-                for s in self._wmi_ohm.Sensor():
-                    if s.SensorType == 'Temperature' and 'CPU' in str(s.Name):
-                        return round(float(s.Value), 1)
-            except Exception:
-                pass
-        return None
-
     # ── GPU ──
 
     def _fill_gpu(self, d: SysData) -> None:
@@ -306,14 +225,13 @@ class DataCollector(QObject):
             d.gpu_mem_used   = m.used
             d.gpu_mem_total  = m.total
             d.gpu_temp       = t
-            # 空载时用 GPU 温度校准 CPU 基准
-            if u.gpu < 5:
-                self._est_base = self._est_base or t
-                self._est_base += (t - self._est_base) * 0.1
         except Exception:
             pass
 
     def cleanup(self) -> None:
+        if self._pdh_query is not None:
+            try: win32pdh.CloseQuery(self._pdh_query)
+            except Exception: pass
         if NVML_OK:
             try: nvmlShutdown()
             except Exception: pass
@@ -381,7 +299,7 @@ class Section(QFrame):
         vbox.setContentsMargins(10, 3, 10, 3)
         vbox.setSpacing(1)
 
-        # ── 顶行：标签 百分比 温度 ──
+        # ── 顶行：标签 百分比 ──
         top = QHBoxLayout()
         top.setSpacing(6)
 
@@ -564,7 +482,9 @@ class MonitorWidget(QWidget):
 
     def _on_data(self, d: SysData) -> None:
         try:
-            self.sec_cpu.refresh(d.cpu_pct, d.cpu_temp)
+            freq = d.cpu_freq
+            self.sec_cpu.refresh(d.cpu_pct,
+                                 info=f"{freq/1000:.2f} GHz" if freq else "")
 
             if d.has_gpu and d.gpu_mem_total > 0:
                 used_gb = d.gpu_mem_used / 1024**3
@@ -802,7 +722,7 @@ class MonitorWidget(QWidget):
 # ════════════════════════════════════════════════════════════════════
 
 def main() -> int:
-    log(f"启动 — NVML={NVML_OK} WMI={WMI_OK}")
+    log(f"启动 — NVML={NVML_OK}")
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
