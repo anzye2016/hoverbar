@@ -498,7 +498,7 @@ class MonitorWidget(QWidget):
     # ── 停靠：屏幕底部居中 ──
 
     def _dock(self) -> None:
-        scr = QApplication.primaryScreen()
+        scr = self.screen() or QApplication.primaryScreen()
         if not scr:
             return
         # 确保布局反映最新的可见性变化
