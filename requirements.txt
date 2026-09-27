@@ -1,0 +1,5 @@
+# HoverBar dependencies
+psutil>=6.0
+PySide6>=6.8
+nvidia-ml-py>=12
+pywin32>=310
