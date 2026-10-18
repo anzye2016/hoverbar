@@ -92,10 +92,9 @@ def _temp_color(t: float) -> QColor:
 
 
 # 字体 — 优先系统高品质字体
+# 数据字体用 Consolas：Cascadia Code 的粗体在 8~9pt 会把数字 5 糊成 6
 FONT_UI     = "Segoe UI Variable Display, Segoe UI, Segoe UI Variable Text"
-FONT_DATA   = "Cascadia Code, JetBrains Mono, Consolas, Courier New"
-# 温度单独用 Consolas：Cascadia Code 的粗体在 8~9pt 会把数字 5 糊成 6
-FONT_TEMP   = "Consolas, Courier New"
+FONT_DATA   = "Consolas, Cascadia Code, Courier New"
 
 # ── 路径（兼容 PyInstaller 打包） ──
 if getattr(sys, 'frozen', False):
@@ -461,7 +460,7 @@ class Section(QFrame):
         bottom.addStretch()
 
         self.lbl_temp = QLabel("")
-        self.lbl_temp.setFont(QFont(FONT_TEMP, 8, QFont.Weight.Bold))
+        self.lbl_temp.setFont(QFont(FONT_DATA, 8, QFont.Weight.Bold))
         self.lbl_temp.hide()               # 无温度源时不占位
         bottom.addWidget(self.lbl_temp)
 
