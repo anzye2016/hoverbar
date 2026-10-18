@@ -8,6 +8,7 @@ HoverBar - 桌面系统监控条
 import sys
 import os
 import json
+import struct
 import traceback
 from datetime import datetime
 
@@ -50,6 +51,7 @@ try:
     from pynvml import (
         nvmlInit, nvmlDeviceGetHandleByIndex,
         nvmlDeviceGetUtilizationRates, nvmlDeviceGetMemoryInfo,
+        nvmlDeviceGetTemperature, NVML_TEMPERATURE_GPU,
         nvmlShutdown, nvmlDeviceGetCount,
     )
     NVML_OK = True
@@ -76,6 +78,18 @@ COLOR_CPU    = QColor(96,  165, 250)     # 柔蓝
 COLOR_GPU    = QColor(251, 113, 133)     # 柔红
 COLOR_MEM    = QColor(52,  211, 153)     # 柔绿
 COLOR_NET    = QColor(167, 139, 250)     # 柔紫
+
+
+def _temp_color(t: float) -> QColor:
+    """温度配色：常温低调灰，越热越醒目"""
+    if t >= 85:
+        return QColor(235, 80, 80)       # 烫
+    if t >= 75:
+        return QColor(255, 145, 60)      # 热
+    if t >= 60:
+        return QColor(255, 190, 70)      # 温热
+    return COLOR_DIM                     # 常温不抢眼
+
 
 # 字体 — 优先系统高品质字体
 FONT_UI     = "Segoe UI Variable Display, Segoe UI, Segoe UI Variable Text"
@@ -107,24 +121,123 @@ def log(msg: str) -> None:
 #  数据采集
 # ════════════════════════════════════════════════════════════════════
 
+# ── Core Temp 共享内存 ──
+#
+# Core Temp 在后台运行时才会创建映射对象，进程退出映射随即消失，
+# 因此 OpenFileMappingW 失败 == Core Temp 未运行（此时不显示 CPU 温度）。
+#
+# 结构（实测 Core Temp x64，与官方 SharedMem 文档布局一致，
+# 但温度 / 频率为 float 而非 DWORD）：
+#     0x000  DWORD uiLoad[256]     各核心负载 %
+#     0x400  DWORD uiTjMax[128]    各 CPU 的 TjMax
+#     0x600  DWORD uiCoreCnt       核心数
+#     0x604  DWORD uiCPUCnt        CPU（封装）数
+#     0x608  float uiTemp[256]     各核心温度 °C
+#     0x808  …                     频率等附加字段（此处不使用）
+
+_CT_MAP_NAMES  = ("CoreTempMappingObjectEx", "CoreTempMappingObject")
+_CT_READ_SIZE  = 4096
+_CT_OFF_CORES  = 0x600
+_CT_OFF_CPUS   = 0x604
+_CT_OFF_TEMP   = 0x608
+_FILE_MAP_READ = 0x0004
+
+
+class CoreTempReader:
+    """从 Core Temp 的共享内存读取 CPU 温度（取所有核心的最高值）。
+
+    Core Temp 未运行时 read_max() 返回 None，调用方据此隐藏温度。
+    每次读取都「开映射 → 读 → 关」，因此不会读到 Core Temp 退出后的僵尸数据。
+    """
+
+    def __init__(self) -> None:
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        k32.OpenFileMappingW.restype = wintypes.HANDLE
+        k32.OpenFileMappingW.argtypes = (
+            wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+        k32.MapViewOfFile.restype = ctypes.c_void_p
+        k32.MapViewOfFile.argtypes = (
+            wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+            wintypes.DWORD, ctypes.c_size_t)
+        k32.UnmapViewOfFile.argtypes = (ctypes.c_void_p,)
+        k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        self._k32 = k32
+        self._name: str | None = None    # 已验证可用的映射名（省一次尝试）
+
+    # ── 取一份原始快照 ──
+
+    def _snapshot(self) -> bytes | None:
+        names = (self._name,) if self._name else _CT_MAP_NAMES
+        for name in names:
+            h = self._k32.OpenFileMappingW(_FILE_MAP_READ, False, name)
+            if not h:
+                continue
+            buf = None
+            try:
+                view = self._k32.MapViewOfFile(h, _FILE_MAP_READ, 0, 0, 0)
+                if view:
+                    try:
+                        buf = ctypes.string_at(view, _CT_READ_SIZE)
+                    finally:
+                        self._k32.UnmapViewOfFile(ctypes.c_void_p(view))
+            finally:
+                self._k32.CloseHandle(h)
+            if buf is not None:
+                self._name = name
+                return buf
+
+        self._name = None            # 下次重新探测
+        return None
+
+    # ── 最高核心温度 ──
+
+    def read_max(self) -> float | None:
+        buf = self._snapshot()
+        if buf is None:
+            return None
+        try:
+            cores, cpus = struct.unpack_from('<2I', buf, _CT_OFF_CORES)
+        except struct.error:
+            return None
+        n = cores * max(1, cpus)
+        if not 1 <= n <= 256:
+            return None
+
+        # 温度数组类型随版本而异：新版 float，旧版 DWORD；取值域筛选区分
+        for code in ('f', 'I'):
+            try:
+                vals = struct.unpack_from(f'<{n}{code}', buf, _CT_OFF_TEMP)
+            except struct.error:
+                continue
+            good = [v for v in vals if 1.0 <= v <= 150.0]
+            if len(good) >= max(1, n // 2):      # 过半合理即认为解析正确
+                return max(good)
+        return None
+
+    def close(self) -> None:
+        pass                                # 无长驻句柄
+
+
 class SysData:
     """一次采集的快照"""
     __slots__ = (
-        'cpu_pct', 'cpu_freq',
+        'cpu_pct', 'cpu_freq', 'cpu_temp',
         'mem_pct', 'mem_used', 'mem_total',
-        'gpu_pct', 'gpu_mem_used', 'gpu_mem_total',
+        'gpu_pct', 'gpu_mem_used', 'gpu_mem_total', 'gpu_temp',
         'net_down', 'net_up',
     )
 
     def __init__(self):
         self.cpu_pct: float = 0.0
         self.cpu_freq: float = 0.0
+        self.cpu_temp: float | None = None      # Core Temp 未运行则为 None
         self.mem_pct: float = 0.0
         self.mem_used: int = 0
         self.mem_total: int = 0
         self.gpu_pct: float | None = None
         self.gpu_mem_used: int | None = None
         self.gpu_mem_total: int | None = None
+        self.gpu_temp: float | None = None
         self.net_down: float = 0.0
         self.net_up: float = 0.0
 
@@ -163,8 +276,13 @@ class DataCollector(QObject):
         self._prev_net = psutil.net_io_counters()
         self._prev_net_at = datetime.now()
 
-        # GPU 区块可见标志（由 MonitorWidget 控制）
+        # CPU 温度来源（Core Temp 共享内存，未运行时读到 None）
+        self._ct = CoreTempReader()
+        self._ct_logged = False
+
+        # 区块可见标志（由 MonitorWidget 控制，隐藏时跳过对应采集）
         self.gpu_enabled = True
+        self.cpu_enabled = True
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._collect)
@@ -190,6 +308,12 @@ class DataCollector(QObject):
             d.mem_pct   = mem.percent
             d.mem_used  = mem.used
             d.mem_total = mem.total
+
+            if self.cpu_enabled:
+                d.cpu_temp = self._ct.read_max()
+                if d.cpu_temp is not None and not self._ct_logged:
+                    self._ct_logged = True
+                    log(f"Core Temp 已连接（CPU {d.cpu_temp:.0f}°C）")
 
             self._fill_gpu(d)
             self._fill_net(d)
@@ -222,6 +346,10 @@ class DataCollector(QObject):
             d.gpu_pct        = u.gpu
             d.gpu_mem_used   = m.used
             d.gpu_mem_total  = m.total
+            try:
+                d.gpu_temp = nvmlDeviceGetTemperature(h, NVML_TEMPERATURE_GPU)
+            except Exception:
+                d.gpu_temp = None
         except Exception:
             pass
 
@@ -229,6 +357,7 @@ class DataCollector(QObject):
         if self._pdh_query is not None:
             try: win32pdh.CloseQuery(self._pdh_query)
             except Exception: pass
+        self._ct.close()
         if NVML_OK:
             try: nvmlShutdown()
             except Exception: pass
@@ -318,17 +447,49 @@ class Section(QFrame):
         self.bar = AnimatedBar(self._color)
         vbox.addWidget(self.bar)
 
-        # ── 底行（VRAM / 内存详情） ──
+        # ── 底行：详情（左） + 温度（右，正对上方百分比） ──
+        bottom = QHBoxLayout()
+        bottom.setSpacing(6)
+
         self.lbl_info = QLabel("")
         self.lbl_info.setFont(QFont(FONT_DATA, 7))
         self.lbl_info.setStyleSheet(f"color: {COLOR_DIM.name()};")
-        vbox.addWidget(self.lbl_info)
+        bottom.addWidget(self.lbl_info)
+
+        bottom.addStretch()
+
+        self.lbl_temp = QLabel("")
+        self.lbl_temp.setFont(QFont(FONT_DATA, 8, QFont.Weight.Bold))
+        self.lbl_temp.hide()               # 无温度源时不占位
+        bottom.addWidget(self.lbl_temp)
+
+        vbox.addLayout(bottom)
+
+        self._temp_txt = ""
 
     def refresh(self, pct: float, info: str = "",
-                bar_pct: float | None = None) -> None:
+                bar_pct: float | None = None,
+                temp: float | None = None) -> None:
         self.lbl_pct.setText(f"{pct:.0f}%")
         self.bar.set_pct(bar_pct if bar_pct is not None else pct)
         self.lbl_info.setText(info)
+        self._set_temp(temp)
+
+    def _set_temp(self, temp: float | None) -> None:
+        """温度不可用（Core Temp 未运行）时隐藏，避免留下空位"""
+        if temp is None:
+            if self._temp_txt:
+                self._temp_txt = ""
+                self.lbl_temp.hide()
+            return
+
+        txt = f"{temp:.0f}°C"
+        if txt != self._temp_txt:
+            self._temp_txt = txt
+            self.lbl_temp.setText(txt)
+            self.lbl_temp.setStyleSheet(f"color: {_temp_color(temp).name()};")
+        if not self.lbl_temp.isVisibleTo(self):
+            self.lbl_temp.show()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -423,8 +584,9 @@ class MonitorWidget(QWidget):
         }
         self._load_config()
         self._apply_visibility()
-        # 同步 GPU 可见性到采集器
+        # 同步区块可见性到采集器（隐藏时跳过对应采集）
         self._collector.gpu_enabled = self._visible_keys.get('gpu', True)
+        self._collector.cpu_enabled = self._visible_keys.get('cpu', True)
         self._dock()
 
     # ── 窗口属性 ──
@@ -477,14 +639,16 @@ class MonitorWidget(QWidget):
         try:
             freq = d.cpu_freq
             self.sec_cpu.refresh(d.cpu_pct,
-                                 info=f"{freq/1000:.2f} GHz" if freq else "")
+                                 info=f"{freq/1000:.2f} GHz" if freq else "",
+                                 temp=d.cpu_temp)
 
             if d.has_gpu and d.gpu_mem_total > 0:
                 used_gb = d.gpu_mem_used / 1024**3
                 tot_gb  = d.gpu_mem_total / 1024**3
                 vram_pct = d.gpu_mem_used / d.gpu_mem_total * 100
                 info    = f"VRAM {used_gb:.1f}/{tot_gb:.1f} GB"
-                self.sec_gpu.refresh(d.gpu_pct, info, bar_pct=vram_pct)
+                self.sec_gpu.refresh(d.gpu_pct, info, bar_pct=vram_pct,
+                                     temp=d.gpu_temp)
 
             used_gb = d.mem_used / 1024**3
             tot_gb  = d.mem_total / 1024**3
@@ -722,9 +886,11 @@ class MonitorWidget(QWidget):
                 action.setChecked(True)
                 return
         self._visible_keys[key] = visible
-        # 同步 GPU 可见性到采集器（隐藏时跳过 NVML 查询）
+        # 同步可见性到采集器（隐藏时跳过 NVML / Core Temp 查询）
         if key == 'gpu':
             self._collector.gpu_enabled = visible
+        elif key == 'cpu':
+            self._collector.cpu_enabled = visible
         self._apply_visibility()
         self._dock()
 
