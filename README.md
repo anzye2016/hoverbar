@@ -2,8 +2,6 @@
 
 半透明 Windows 任务栏监控条 —— 实时显示 CPU / GPU / 内存 / 网速。
 
-> **显示 CPU 温度需要 [Core Temp](https://www.alcpu.com/CoreTemp/) 在后台运行。** 它是第三方软件（版权归 ALCPU），本仓库不包含它的可执行文件，请自行从官网下载并保持运行；GPU 温度无需任何额外软件。
-
 ---
 
 ## 功能
@@ -14,7 +12,6 @@
 | 🎮 **GPU** | 使用率 + 显存 + 温度（NVIDIA） |
 | 📊 **内存** | 使用率 + 已用/总量 |
 | 🌐 **网速** | 下载/上传速率 |
-| 🌡 **温度** | 显示在进度条下方，随冷热变色 |
 | 🎨 **外观** | 半透明深色，无边框，始终置顶 |
 | 🖱 **交互** | 拖拽移动，双击复位 |
 | 📋 **菜单** | 右键选择显示/隐藏区块 |
@@ -22,41 +19,7 @@
 
 ## 温度显示
 
-百分比在进度条上方，温度在进度条下方、正对上方百分比，并按冷热变色（< 60°C 灰 → 60°C 黄 → 75°C 橙 → 85°C 红）。
-
-| 指标 | 来源 | 要求 |
-|---|---|---|
-| **GPU 温度** | NVML | 有 NVIDIA 驱动即可直读，无需额外软件 |
-| **CPU 温度** | [Core Temp](https://www.alcpu.com/CoreTemp/) 共享内存 | 需 Core Temp 在后台运行 |
-
-CPU 温度为什么要借助 Core Temp：Windows 的 WMI / 驱动层只能拿到主板（封装附近）温度，读不准核心温度，而 Core Temp 用内核驱动读 CPU 内部传感器，读数才准确。
-
-HoverBar 直接读取 Core Temp 的共享内存（`CoreTempMappingObjectEx`），取所有核心中的最高值 —— 不注入进程、不装插件、也不额外占 CPU：
-
-- Core Temp **在后台运行** → 显示 CPU 温度
-- Core Temp **未运行** → 自动隐藏 CPU 温度，其余指标照常（不会显示过期数值）
-
-> Core Temp 保持「启动时最小化到通知区域」即可，无需窗口可见。
-
-### 让 Core Temp 随系统启动
-
-Core Temp 自带的「随 Windows 启动」开关在部分安装方式下不生效（勾选点应用、重进设置又变回未勾选），而且它的清单要求管理员权限 —— 走「启动」文件夹或 Run 注册表项，每次登录都会弹一次 UAC。正确做法是建一个**以最高权限运行**的计划任务，登录后静默启动、不弹 UAC：
-
-```powershell
-# 用「管理员身份」打开 PowerShell，先 cd 到 Core Temp 所在目录，再执行一次
-$exe = Join-Path (Get-Location).Path 'Core Temp x64.exe'
-$me  = "$env:USERDOMAIN\$env:USERNAME"
-$act = New-ScheduledTaskAction -Execute $exe -WorkingDirectory (Split-Path $exe)
-$trg = New-ScheduledTaskTrigger -AtLogOn -User $me
-$trg.Delay = 'PT20S'                                       # 等桌面加载完再启动
-$prn = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Highest
-$set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-                                    -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
-Register-ScheduledTask -TaskName 'Core Temp' -Action $act -Trigger $trg `
-                       -Settings $set -Principal $prn -Force
-```
-
-任务里写死了 exe 路径：之后移动位置或重装到别的目录，需要重建任务。删掉它执行 `Unregister-ScheduledTask -TaskName 'Core Temp'`。
+百分比在进度条上方，温度在进度条下方、正对上方百分比，并按冷热变色（< 60°C 灰 → 60°C 黄 → 75°C 橙 → 85°C 红）。显示 CPU 温度需后台运行 Core Temp。
 
 ## 快速开始
 
@@ -88,15 +51,6 @@ HoverBar.exe
 
 监控条停靠在屏幕左下角、任务栏上方，高度自动匹配任务栏；右键菜单可选择显示/隐藏。
 
-## 分发
-
-`HoverBar.exe` 是单文件绿色版，拷走即可运行，不写注册表、不需要安装。
-
-CPU 温度依赖的 Core Temp 是第三方软件（版权归 [ALCPU](https://www.alcpu.com/CoreTemp/)），本仓库既不包含也不随包分发 —— 需要 CPU 温度的人请各自到官网下载，让它常驻后台即可，HoverBar 会自动识别，本机无需任何配置改动：
-
-- Core Temp 在后台运行 → 显示 CPU 温度
-- 没有 Core Temp → 不显示 CPU 温度，其它指标照常
-
 ## 构建
 
 ```bash
@@ -121,8 +75,6 @@ CPU 温度依赖的 Core Temp 是第三方软件（版权归 [ALCPU](https://www
 | [psutil](https://pypi.org/project/psutil/) | CPU / 内存 / 网速 |
 | [nvidia-ml-py](https://pypi.org/project/nvidia-ml-py/) | NVIDIA GPU 监控（利用率 / 显存 / 温度） |
 | [pywin32](https://pypi.org/project/pywin32/) | Windows API |
-
-可选（非 pip 依赖）：[Core Temp](https://www.alcpu.com/CoreTemp/) —— 运行它才显示 CPU 温度。
 
 ## 截图
 
