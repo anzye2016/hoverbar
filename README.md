@@ -2,6 +2,8 @@
 
 半透明 Windows 任务栏监控条 —— 实时显示 CPU / GPU / 内存 / 网速。
 
+> **显示 CPU 温度需要 [Core Temp](https://www.alcpu.com/CoreTemp/) 在后台运行。** 它是第三方软件（版权归 ALCPU），本仓库不包含它的可执行文件，请自行从官网下载并保持运行；GPU 温度无需任何额外软件。
+
 ---
 
 ## 功能
@@ -41,8 +43,8 @@ HoverBar 直接读取 Core Temp 的共享内存（`CoreTempMappingObjectEx`）�
 Core Temp 自带的「随 Windows 启动」开关在部分安装方式下不生效（勾选点应用、重进设置又变回未勾选），而且它的清单要求管理员权限 —— 走「启动」文件夹或 Run 注册表项，每次登录都会弹一次 UAC。正确做法是建一个**以最高权限运行**的计划任务，登录后静默启动、不弹 UAC：
 
 ```powershell
-# 用「管理员身份」打开 PowerShell 执行一次
-$exe = 'C:\Program Files\CoreTemp\Core Temp x64.exe'      # ← 改成你的实际路径
+# 用「管理员身份」打开 PowerShell，先 cd 到 Core Temp 所在目录，再执行一次
+$exe = Join-Path (Get-Location).Path 'Core Temp x64.exe'
 $me  = "$env:USERDOMAIN\$env:USERNAME"
 $act = New-ScheduledTaskAction -Execute $exe -WorkingDirectory (Split-Path $exe)
 $trg = New-ScheduledTaskTrigger -AtLogOn -User $me
@@ -85,6 +87,15 @@ HoverBar.exe
 ```
 
 监控条停靠在屏幕左下角、任务栏上方，高度自动匹配任务栏；右键菜单可选择显示/隐藏。
+
+## 分发
+
+`HoverBar.exe` 是单文件绿色版，拷走即可运行，不写注册表、不需要安装。
+
+CPU 温度依赖的 Core Temp 是第三方软件（版权归 [ALCPU](https://www.alcpu.com/CoreTemp/)），本仓库既不包含也不随包分发 —— 需要 CPU 温度的人请各自到官网下载，让它常驻后台即可，HoverBar 会自动识别，本机无需任何配置改动：
+
+- Core Temp 在后台运行 → 显示 CPU 温度
+- 没有 Core Temp → 不显示 CPU 温度，其它指标照常
 
 ## 构建
 

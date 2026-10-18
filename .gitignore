@@ -6,3 +6,9 @@ hoverbar.json
 build/
 dist/
 HoverBar.exe
+
+# Core Temp 便携版（第三方程序，不入库；分发时直接打包整个文件夹）
+Core Temp x64.exe
+Core Temp.exe
+CoreTemp.ini
+Languages/
