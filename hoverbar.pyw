@@ -611,7 +611,8 @@ class MonitorWidget(QWidget):
         self._drag      = False
         self._drag_from = QPoint()
         self._menu_open = False
-        self._always_on_top = True
+        self._last_data: SysData | None = None
+        self._load_config()            # 先读配置：置顶状态、温度/功耗开关
 
         self._build_window()
         self._build_ui()
@@ -630,7 +631,6 @@ class MonitorWidget(QWidget):
             'mem': (self.sec_mem, self._sep3),
             'net': (self.sec_net, None),
         }
-        self._load_config()
         self._apply_visibility()
         # 同步区块可见性到采集器（隐藏时跳过对应采集）
         self._collector.gpu_enabled = self._visible_keys.get('gpu', True)
@@ -640,11 +640,10 @@ class MonitorWidget(QWidget):
     # ── 窗口属性 ──
 
     def _build_window(self) -> None:
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool               # 无任务栏图标
-        )
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool  # Tool: 无任务栏图标
+        if self._always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFixedHeight(WIDGET_HEIGHT)
@@ -685,11 +684,14 @@ class MonitorWidget(QWidget):
 
     def _on_data(self, d: SysData) -> None:
         try:
+            self._last_data = d
+            show_temp  = self._show.get('temp', True)
+            show_power = self._show.get('power', False)
             freq = d.cpu_freq
             self.sec_cpu.refresh(d.cpu_pct,
                                  info=f"{freq/1000:.2f} GHz" if freq else "",
-                                 temp=d.cpu_temp,
-                                 power=d.cpu_power)
+                                 temp=d.cpu_temp if show_temp else None,
+                                 power=d.cpu_power if show_power else None)
 
             if d.has_gpu and d.gpu_mem_total > 0:
                 used_gb = d.gpu_mem_used / 1024**3
@@ -697,8 +699,8 @@ class MonitorWidget(QWidget):
                 vram_pct = d.gpu_mem_used / d.gpu_mem_total * 100
                 info    = f"VRAM {used_gb:.1f}/{tot_gb:.1f} GB"
                 self.sec_gpu.refresh(d.gpu_pct, info, bar_pct=vram_pct,
-                                     temp=d.gpu_temp,
-                                     power=d.gpu_power)
+                                     temp=d.gpu_temp if show_temp else None,
+                                     power=d.gpu_power if show_power else None)
 
             used_gb = d.mem_used / 1024**3
             tot_gb  = d.mem_total / 1024**3
@@ -759,6 +761,7 @@ class MonitorWidget(QWidget):
             )
         except Exception:
             pass
+        self._save_config()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -767,17 +770,24 @@ class MonitorWidget(QWidget):
     # ── 选择性显示 ──
 
     def _load_config(self) -> None:
-        """读取 hoverbar.json，首次运行默认全部可见"""
+        """读取 hoverbar.json；首次运行：区块全开、只显示温度、不置顶"""
         defaults = {'cpu': True, 'gpu': True, 'mem': True, 'net': True}
+        show_defaults = {'temp': True, 'power': False}
+        cfg = {}
         try:
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    saved = json.load(f).get('visible', {})
-                self._visible_keys = {k: saved.get(k, defaults[k]) for k in defaults}
-            else:
-                self._visible_keys = dict(defaults)
+                    cfg = json.load(f)
         except Exception:
-            self._visible_keys = dict(defaults)
+            cfg = {}
+
+        saved = cfg.get('visible', {}) if isinstance(cfg, dict) else {}
+        self._visible_keys = {k: saved.get(k, defaults[k]) for k in defaults}
+
+        saved_show = cfg.get('show', {}) if isinstance(cfg, dict) else {}
+        self._show = {k: saved_show.get(k, show_defaults[k]) for k in show_defaults}
+
+        self._always_on_top = bool(cfg.get('always_on_top', False))
 
     def _save_config(self) -> None:
         """写入 hoverbar.json（防抖：300ms 内多次调用只写一次）"""
@@ -796,7 +806,11 @@ class MonitorWidget(QWidget):
         """实际写入磁盘"""
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump({'visible': self._visible_keys}, f, indent=2)
+                json.dump({
+                    'visible': self._visible_keys,
+                    'show': self._show,
+                    'always_on_top': self._always_on_top,
+                }, f, indent=2)
         except Exception:
             pass
 
@@ -912,6 +926,21 @@ class MonitorWidget(QWidget):
 
         menu.addSeparator()
 
+        # 温度 / 功耗开关（默认只显示温度）
+        show_info = [
+            ('temp', 'Temperature'),
+            ('power', 'Power'),
+        ]
+        for key, label in show_info:
+            a = QAction(label, self)
+            a.setCheckable(True)
+            a.setChecked(self._show.get(key, False))
+            a._show_key = key
+            a.toggled.connect(self._on_show_toggled)
+            menu.addAction(a)
+
+        menu.addSeparator()
+
         a_quit = QAction("Quit", self)
         a_quit.triggered.connect(self._quit)
         menu.addAction(a_quit)
@@ -943,6 +972,19 @@ class MonitorWidget(QWidget):
             self._collector.cpu_enabled = visible
         self._apply_visibility()
         self._dock()
+
+    def _on_show_toggled(self, visible: bool) -> None:
+        """切换温度 / 功耗的显示，立即重排避免留空"""
+        action = self.sender()
+        self._show[action._show_key] = visible
+        self._save_config()
+        # 立刻按新开关重画一次（下一次采集也会自然生效）
+        self._refresh_now()
+
+    def _refresh_now(self) -> None:
+        """用上一帧数据立即刷新（不额外采集）"""
+        if self._last_data is not None:
+            self._on_data(self._last_data)
 
     def _quit(self) -> None:
         log("退出")
