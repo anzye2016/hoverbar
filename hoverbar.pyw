@@ -81,16 +81,19 @@ COLOR_MEM    = QColor(52,  211, 153)     # 柔绿
 COLOR_NET    = QColor(167, 139, 250)     # 柔紫
 
 
-def _temp_color(t: float) -> QColor:
-    """温度配色：常温低调灰，越热越醒目。
+# 温度配色阈值 (色变黄, 变橙, 变红) °C — CPU / GPU 各自的温度墙不同，分开设
+TEMP_BANDS_CPU = (65, 80, 90)     # TjMax≈95
+TEMP_BANDS_GPU = (60, 70, 80)     # 显卡 80 就算烫
 
-    阈值按 TjMax≈95°C 的桌面 CPU / GPU 取：90 起才红，避免满载就报警。
-    """
-    if t >= 90:
+
+def _temp_color(t: float, bands: tuple[int, int, int] = TEMP_BANDS_CPU) -> QColor:
+    """温度配色：常温低调灰，越热越醒目"""
+    warn, hot, crit = bands
+    if t >= crit:
         return QColor(235, 80, 80)       # 烫
-    if t >= 80:
+    if t >= hot:
         return QColor(255, 145, 60)      # 热
-    if t >= 65:
+    if t >= warn:
         return QColor(255, 190, 70)      # 温热
     return COLOR_DIM                     # 常温不抢眼
 
@@ -440,9 +443,11 @@ class AnimatedBar(QWidget):
 class Section(QFrame):
     """一个指标的显示单元（CPU / GPU / MEM）"""
 
-    def __init__(self, label: str, color: QColor, parent=None):
+    def __init__(self, label: str, color: QColor,
+                 bands: tuple[int, int, int] = TEMP_BANDS_CPU, parent=None):
         super().__init__(parent)
         self._color = color
+        self._bands = bands          # 温度配色阈值
         self._build_ui(label)
 
     def _build_ui(self, label: str) -> None:
@@ -526,7 +531,7 @@ class Section(QFrame):
         if txt != self._temp_txt:
             self._temp_txt = txt
             self.lbl_temp.setText(txt)
-            self.lbl_temp.setStyleSheet(f"color: {_temp_color(t).name()};")
+            self.lbl_temp.setStyleSheet(f"color: {_temp_color(t, self._bands).name()};")
         if not self.lbl_temp.isVisibleTo(self):
             self.lbl_temp.show()
 
@@ -662,8 +667,8 @@ class MonitorWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.sec_cpu = Section("CPU", COLOR_CPU)
-        self.sec_gpu = Section("GPU", COLOR_GPU)
+        self.sec_cpu = Section("CPU", COLOR_CPU, TEMP_BANDS_CPU)
+        self.sec_gpu = Section("GPU", COLOR_GPU, TEMP_BANDS_GPU)
         self.sec_mem = Section("MEM", COLOR_MEM)
         self.sec_net = NetSection()
 
