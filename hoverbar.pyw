@@ -52,6 +52,7 @@ try:
         nvmlInit, nvmlDeviceGetHandleByIndex,
         nvmlDeviceGetUtilizationRates, nvmlDeviceGetMemoryInfo,
         nvmlDeviceGetTemperature, NVML_TEMPERATURE_GPU,
+        nvmlDeviceGetPowerUsage,
         nvmlShutdown, nvmlDeviceGetCount,
     )
     NVML_OK = True
@@ -134,20 +135,24 @@ def log(msg: str) -> None:
 #     0x600  DWORD uiCoreCnt       核心数
 #     0x604  DWORD uiCPUCnt        CPU（封装）数
 #     0x608  float uiTemp[256]     各核心温度 °C
-#     0x808  …                     频率等附加字段（此处不使用）
+#     0xA18  char  ucCPUName        CPU 名称（ANSI）
+#     0xC84  float                 封装功耗 W（AMD 实测，Intel 未验证）
+#     0xE84  float                 各核心频率 GHz×10
 
 _CT_MAP_NAMES  = ("CoreTempMappingObjectEx", "CoreTempMappingObject")
 _CT_READ_SIZE  = 4096
 _CT_OFF_CORES  = 0x600
 _CT_OFF_CPUS   = 0x604
 _CT_OFF_TEMP   = 0x608
+_CT_OFF_NAME   = 0xA18
+_CT_OFF_POWER  = 0xC84
 _FILE_MAP_READ = 0x0004
 
 
 class CoreTempReader:
-    """从 Core Temp 的共享内存读取 CPU 温度（取所有核心的最高值）。
+    """从 Core Temp 的共享内存读取 CPU 温度与功耗。
 
-    Core Temp 未运行时 read_max() 返回 None，调用方据此隐藏温度。
+    read() 返回 (最高核心温度, 封装功耗 W)；Core Temp 未运行时两者都是 None。
     每次读取都「开映射 → 读 → 关」，因此不会读到 Core Temp 退出后的僵尸数据。
     """
 
@@ -190,20 +195,22 @@ class CoreTempReader:
         self._name = None            # 下次重新探测
         return None
 
-    # ── 最高核心温度 ──
+    # ── 温度 + 功耗 ──
 
-    def read_max(self) -> float | None:
+    def read(self) -> tuple[float | None, float | None]:
+        """返回 (最高核心温度 °C, 封装功耗 W)，取不到则为 None"""
         buf = self._snapshot()
         if buf is None:
-            return None
+            return None, None
         try:
             cores, cpus = struct.unpack_from('<2I', buf, _CT_OFF_CORES)
         except struct.error:
-            return None
+            return None, None
         n = cores * max(1, cpus)
         if not 1 <= n <= 256:
-            return None
+            return None, None
 
+        temp = None
         # 温度数组类型随版本而异：新版 float，旧版 DWORD；取值域筛选区分
         for code in ('f', 'I'):
             try:
@@ -212,8 +219,18 @@ class CoreTempReader:
                 continue
             good = [v for v in vals if 1.0 <= v <= 150.0]
             if len(good) >= max(1, n // 2):      # 过半合理即认为解析正确
-                return max(good)
-        return None
+                temp = max(good)
+                break
+
+        # 封装功耗只在 AMD 平台验证过（Ryzen 7 5700X，与 Core Temp 界面读数一致）；
+        # 其它平台该偏移含义未知，宁可不显示也不给错数
+        power = None
+        name = buf[_CT_OFF_NAME:_CT_OFF_NAME + 64].split(b'\0')[0]
+        if b'AMD' in name.upper():
+            p = struct.unpack_from('<f', buf, _CT_OFF_POWER)[0]
+            if 1.0 <= p <= 500.0:
+                power = p
+        return temp, power
 
     def close(self) -> None:
         pass                                # 无长驻句柄
@@ -222,9 +239,9 @@ class CoreTempReader:
 class SysData:
     """一次采集的快照"""
     __slots__ = (
-        'cpu_pct', 'cpu_freq', 'cpu_temp',
+        'cpu_pct', 'cpu_freq', 'cpu_temp', 'cpu_power',
         'mem_pct', 'mem_used', 'mem_total',
-        'gpu_pct', 'gpu_mem_used', 'gpu_mem_total', 'gpu_temp',
+        'gpu_pct', 'gpu_mem_used', 'gpu_mem_total', 'gpu_temp', 'gpu_power',
         'net_down', 'net_up',
     )
 
@@ -232,6 +249,7 @@ class SysData:
         self.cpu_pct: float = 0.0
         self.cpu_freq: float = 0.0
         self.cpu_temp: float | None = None      # Core Temp 未运行则为 None
+        self.cpu_power: float | None = None
         self.mem_pct: float = 0.0
         self.mem_used: int = 0
         self.mem_total: int = 0
@@ -239,6 +257,7 @@ class SysData:
         self.gpu_mem_used: int | None = None
         self.gpu_mem_total: int | None = None
         self.gpu_temp: float | None = None
+        self.gpu_power: float | None = None
         self.net_down: float = 0.0
         self.net_up: float = 0.0
 
@@ -311,10 +330,10 @@ class DataCollector(QObject):
             d.mem_total = mem.total
 
             if self.cpu_enabled:
-                d.cpu_temp = self._ct.read_max()
+                d.cpu_temp, d.cpu_power = self._ct.read()
                 if d.cpu_temp is not None and not self._ct_logged:
                     self._ct_logged = True
-                    log(f"Core Temp 已连接（CPU {d.cpu_temp:.0f}°C）")
+                    log(f"Core Temp 已连接（CPU {d.cpu_temp:.0f}°C {d.cpu_power or 0:.0f}W）")
 
             self._fill_gpu(d)
             self._fill_net(d)
@@ -351,6 +370,10 @@ class DataCollector(QObject):
                 d.gpu_temp = nvmlDeviceGetTemperature(h, NVML_TEMPERATURE_GPU)
             except Exception:
                 d.gpu_temp = None
+            try:
+                d.gpu_power = nvmlDeviceGetPowerUsage(h) / 1000.0   # mW -> W
+            except Exception:
+                d.gpu_power = None
         except Exception:
             pass
 
@@ -437,6 +460,12 @@ class Section(QFrame):
 
         top.addStretch()
 
+        self.lbl_power = QLabel("")
+        self.lbl_power.setFont(QFont(FONT_DATA, 8))
+        self.lbl_power.setStyleSheet(f"color: {COLOR_DIM.name()};")
+        self.lbl_power.hide()              # 无功耗源时不占位
+        top.addWidget(self.lbl_power)
+
         self.lbl_pct = QLabel("0%")
         self.lbl_pct.setFont(QFont(FONT_DATA, 9))
         self.lbl_pct.setStyleSheet(f"color: {COLOR_TEXT.name()};")
@@ -467,14 +496,17 @@ class Section(QFrame):
         vbox.addLayout(bottom)
 
         self._temp_txt = ""
+        self._power_txt = ""
 
     def refresh(self, pct: float, info: str = "",
                 bar_pct: float | None = None,
-                temp: float | None = None) -> None:
+                temp: float | None = None,
+                power: float | None = None) -> None:
         self.lbl_pct.setText(f"{pct:.0f}%")
         self.bar.set_pct(bar_pct if bar_pct is not None else pct)
         self.lbl_info.setText(info)
         self._set_temp(temp)
+        self._set_power(power)
 
     def _set_temp(self, temp: float | None) -> None:
         """温度不可用（Core Temp 未运行）时隐藏，避免留下空位"""
@@ -491,6 +523,21 @@ class Section(QFrame):
             self.lbl_temp.setStyleSheet(f"color: {_temp_color(temp).name()};")
         if not self.lbl_temp.isVisibleTo(self):
             self.lbl_temp.show()
+
+    def _set_power(self, power: float | None) -> None:
+        """功耗取不到时隐藏（Core Temp 未运行 / 非 AMD / 驱动不支持）"""
+        if power is None:
+            if self._power_txt:
+                self._power_txt = ""
+                self.lbl_power.hide()
+            return
+
+        txt = f"{power:.0f}W"
+        if txt != self._power_txt:
+            self._power_txt = txt
+            self.lbl_power.setText(txt)
+        if not self.lbl_power.isVisibleTo(self):
+            self.lbl_power.show()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -641,7 +688,8 @@ class MonitorWidget(QWidget):
             freq = d.cpu_freq
             self.sec_cpu.refresh(d.cpu_pct,
                                  info=f"{freq/1000:.2f} GHz" if freq else "",
-                                 temp=d.cpu_temp)
+                                 temp=d.cpu_temp,
+                                 power=d.cpu_power)
 
             if d.has_gpu and d.gpu_mem_total > 0:
                 used_gb = d.gpu_mem_used / 1024**3
@@ -649,7 +697,8 @@ class MonitorWidget(QWidget):
                 vram_pct = d.gpu_mem_used / d.gpu_mem_total * 100
                 info    = f"VRAM {used_gb:.1f}/{tot_gb:.1f} GB"
                 self.sec_gpu.refresh(d.gpu_pct, info, bar_pct=vram_pct,
-                                     temp=d.gpu_temp)
+                                     temp=d.gpu_temp,
+                                     power=d.gpu_power)
 
             used_gb = d.mem_used / 1024**3
             tot_gb  = d.mem_total / 1024**3
