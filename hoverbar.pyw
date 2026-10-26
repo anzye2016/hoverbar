@@ -83,7 +83,7 @@ COLOR_NET    = QColor(167, 139, 250)     # 柔紫
 
 # 温度配色阈值 (色变黄, 变橙, 变红) °C — CPU / GPU 各自的温度墙不同，分开设
 TEMP_BANDS_CPU = (65, 80, 90)     # TjMax≈95
-TEMP_BANDS_GPU = (60, 70, 80)     # 显卡 80 就算烫
+TEMP_BANDS_GPU = (65, 70, 80)     # 65 起变黄，80 就算烫
 
 
 def _temp_color(t: float, bands: tuple[int, int, int] = TEMP_BANDS_CPU) -> QColor:
