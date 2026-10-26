@@ -708,7 +708,7 @@ class MonitorWidget(QWidget):
                 used_gb = d.gpu_mem_used / 1024**3
                 tot_gb  = d.gpu_mem_total / 1024**3
                 vram_pct = d.gpu_mem_used / d.gpu_mem_total * 100
-                info    = f"VRAM {used_gb:.1f}/{tot_gb:.1f} GB"
+                info    = f"{used_gb:.1f}/{tot_gb:.1f} GB"   # 省掉 "VRAM" 前缀，给温度留位置
                 self.sec_gpu.refresh(d.gpu_pct, info, bar_pct=vram_pct,
                                      temp=d.gpu_temp if show_temp else None,
                                      power=d.gpu_power if show_power else None)
