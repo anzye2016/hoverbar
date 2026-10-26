@@ -82,12 +82,15 @@ COLOR_NET    = QColor(167, 139, 250)     # 柔紫
 
 
 def _temp_color(t: float) -> QColor:
-    """温度配色：常温低调灰，越热越醒目"""
-    if t >= 85:
+    """温度配色：常温低调灰，越热越醒目。
+
+    阈值按 TjMax≈95°C 的桌面 CPU / GPU 取：90 起才红，避免满载就报警。
+    """
+    if t >= 90:
         return QColor(235, 80, 80)       # 烫
-    if t >= 75:
+    if t >= 80:
         return QColor(255, 145, 60)      # 热
-    if t >= 60:
+    if t >= 65:
         return QColor(255, 190, 70)      # 温热
     return COLOR_DIM                     # 常温不抢眼
 
@@ -516,11 +519,14 @@ class Section(QFrame):
                 self.lbl_temp.hide()
             return
 
-        txt = f"{temp:.0f}°C"
+        # 先取整再配色：显示的数字和颜色判定用同一个整数，边界不会出现
+        # 「显示 65°C 却是灰色」这种不一致
+        t = round(temp)
+        txt = f"{t}°C"
         if txt != self._temp_txt:
             self._temp_txt = txt
             self.lbl_temp.setText(txt)
-            self.lbl_temp.setStyleSheet(f"color: {_temp_color(temp).name()};")
+            self.lbl_temp.setStyleSheet(f"color: {_temp_color(t).name()};")
         if not self.lbl_temp.isVisibleTo(self):
             self.lbl_temp.show()
 
