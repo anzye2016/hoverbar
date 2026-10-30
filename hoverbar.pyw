@@ -787,7 +787,8 @@ class MonitorWidget(QWidget):
         cfg = {}
         try:
             if os.path.exists(CONFIG_FILE):
-                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                # utf-8-sig：容忍记事本 / PowerShell 5.1 写出的 BOM，否则会解析失败退回默认值
+                with open(CONFIG_FILE, 'r', encoding='utf-8-sig') as f:
                     cfg = json.load(f)
         except Exception:
             cfg = {}
